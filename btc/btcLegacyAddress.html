@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>BTC WIF → Legacy 地址转换</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/elliptic/6.5.4/elliptic.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="container">
+  <h1>BTC WIF → Legacy Address 批量转换</h1>
+
+  <label>输入 WIF（每行一个，最多 5000 行）：</label>
+  <textarea id="wifInput" placeholder="每行一个 WIF"></textarea>
+
+  <button id="convertBtn">批量转换</button>
+
+  <textarea id="resultBox" readonly placeholder="这里会输出批量生成的 Legacy 地址（每行一个）"></textarea>
+</div>
+
+<script src="app.js"></script>
+
+</body>
+</html>

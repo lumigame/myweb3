@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SHA256 / BTC WIF Generator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            font-size: 22px;
+            margin-bottom: 10px;
+        }
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        textarea {
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 160px;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-family: Consolas, monospace;
+            font-size: 14px;
+            resize: vertical;
+        }
+        .label {
+            font-weight: bold;
+            margin: 12px 0 6px;
+        }
+        .btn-row {
+            margin: 12px 0;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 8px 16px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button.primary {
+            background-color: #1976d2;
+            color: #ffffff;
+        }
+        button.secondary {
+            background-color: #e0e0e0;
+            color: #333333;
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .hint {
+            font-size: 12px;
+            color: #666666;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>SHA256 / BTC WIF Generator</h1>
+
+    <label>
+        <input type="checkbox" id="btcMode">
+        是否转换成WIF压缩格式的私钥(WIF, compressed)
+    </label>
+
+    <div class="label">输入口令,每行一个</div>
+    <textarea id="inputText" placeholder="One line per entry&#10;Each non-empty line will be hashed with SHA256"></textarea>
+    <div class="hint">
+        Output format:  
+        - Normal mode: <code>0x + sha256</code><br>
+        - BTC mode: <code>WIF private key (K/L ...)</code>
+    </div>
+
+    <div class="btn-row">
+        <button class="primary" id="generateBtn">生成</button>
+        <button class="secondary" id="clearBtn">清空</button>
+        <button class="secondary" id="copyBtn">复制全部</button>
+    </div>
+
+    <div class="label">Output</div>
+    <textarea id="logOutput" readonly placeholder="Output will appear here..."></textarea>
+</div>
+
+<script>
+    // Convert ArrayBuffer → hex
+    function bufferToHex(buffer) {
+        var bytes = new Uint8Array(buffer);
+        var hex = '';
+        for (var i = 0; i < bytes.length; i++) {
+            var byteHex = bytes[i].toString(16);
+            if (byteHex.length === 1) byteHex = '0' + byteHex;
+            hex += byteHex;
+        }
+        return hex;
+    }
+
+    // SHA256 string
+    async function sha256(message) {
+        var encoder = new TextEncoder();
+        var data = encoder.encode(message);
+        var hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        return bufferToHex(hashBuffer);
+    }
+
+    //-----------------------------------------
+    // BTC: Convert raw hex private key → WIF
+    //-----------------------------------------
+    function hexToBytes(hex) {
+        var out = new Uint8Array(hex.length / 2);
+        for (var i = 0; i < out.length; i++) {
+            out[i] = parseInt(hex.substr(i * 2, 2), 16);
+        }
+        return out;
+    }
+
+    async function sha256Bytes(bytes) {
+        const hash = await crypto.subtle.digest("SHA-256", bytes);
+        return new Uint8Array(hash);
+    }
+
+    function concatBytes(a, b) {
+        var out = new Uint8Array(a.length + b.length);
+        out.set(a, 0);
+        out.set(b, a.length);
+        return out;
+    }
+
+    const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    function base58Encode(buffer) {
+        let x = BigInt("0x" + Array.from(buffer).map(b => b.toString(16).padStart(2, "0")).join(""));
+        let output = "";
+
+        while (x > 0n) {
+            let mod = x % 58n;
+            x = x / 58n;
+            output = ALPHABET[Number(mod)] + output;
+        }
+        // handle leading zeros
+        for (let i = 0; i < buffer.length && buffer[i] === 0; i++) {
+            output = "1" + output;
+        }
+        return output;
+    }
+
+    async function toWIF(hex) {
+        const raw = hexToBytes(hex);
+
+        // Step 1: 0x80 + privKey + 0x01 (compressed)
+        var payload = new Uint8Array(1 + raw.length + 1);
+        payload[0] = 0x80;
+        payload.set(raw, 1);
+        payload[payload.length - 1] = 0x01; // compressed flag
+
+        // Step 2: checksum = first 4 bytes of double SHA256
+        const h1 = await sha256Bytes(payload);
+        const h2 = await sha256Bytes(h1);
+        const checksum = h2.slice(0, 4);
+
+        // Step 3: payload + checksum
+        const finalBytes = concatBytes(payload, checksum);
+
+        // Step 4: Base58Check
+        return base58Encode(finalBytes);
+    }
+
+    //-----------------------------------------
+    // Main generate logic
+    //-----------------------------------------
+    async function generateLog() {
+        var input = document.getElementById('inputText').value;
+        var btcMode = document.getElementById('btcMode').checked;
+        var logOutput = document.getElementById('logOutput');
+        var generateBtn = document.getElementById('generateBtn');
+
+        generateBtn.disabled = true;
+        var originalBtnText = generateBtn.textContent;
+        generateBtn.textContent = "Generating...";
+
+        var lines = input.split('\n');
+        var outputLines = [];
+
+        for (var line of lines) {
+            line = line.replace(/\r$/, '');
+            if (!line.trim()) continue;
+
+            // 1. compute sha256 → raw private key
+            var hex = await sha256(line);
+
+            if (!btcMode) {
+                // Normal mode (original behavior)
+                outputLines.push("0x" + hex);
+            } else {
+                // BTC WIF mode
+                var wif = await toWIF(hex);
+                outputLines.push(wif);
+            }
+        }
+
+        logOutput.value = outputLines.join('\n');
+
+        generateBtn.disabled = false;
+        generateBtn.textContent = originalBtnText;
+    }
+
+    //-----------------------------------------
+    // Copy + Clear
+    //-----------------------------------------
+    async function copyLog() {
+        var out = document.getElementById('logOutput').value;
+        if (!out) return;
+
+        await navigator.clipboard.writeText(out);
+        var btn = document.getElementById('copyBtn');
+        var old = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => btn.textContent = old, 1200);
+    }
+
+    function clearAll() {
+        document.getElementById('inputText').value = '';
+        document.getElementById('logOutput').value = '';
+    }
+
+    //-----------------------------------------
+    // Event binding
+    //-----------------------------------------
+    document.getElementById('generateBtn').onclick = generateLog;
+    document.getElementById('copyBtn').onclick = copyLog;
+    document.getElementById('clearBtn').onclick = clearAll;
+
+</script>
+</body>
+</html>
