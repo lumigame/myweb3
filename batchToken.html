@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>批量转出 ERC20（Moralis 终极防错版）</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+<style>
+body{font-family:"Microsoft YaHei",Arial;max-width:960px;margin:auto;padding:20px;}
+h1{font-size:20px;}
+label{display:block;margin-top:10px;font-weight:bold;}
+input,textarea{width:100%;padding:8px;font-size:14px;box-sizing:border-box;}
+textarea{min-height:100px;font-family:monospace;}
+button{padding:8px 14px;margin-top:10px;border:1px solid #333;border-radius:6px;cursor:pointer;background:#f2f2f2;}
+.log{background:#111;color:#ddd;padding:10px;white-space:pre-wrap;border-radius:8px;min-height:200px;font-family:monospace;}
+</style>
+</head>
+<body>
+
+<h1>批量转出 ERC-20（Moralis 终极防错版）</h1>
+<p style="color:#666">
+✅ 自动识别代币余额与小数位 ✅ BigNumber 格式全面兼容 ✅ 动态 Nonce + 延迟 ✅ 稳定防冲突 ✅ 可选 ETH 一并转出
+</p>
+
+<label>钱包私钥</label>
+<input id="priv" type="password" placeholder="0x...">
+
+<label>目标地址</label>
+<input id="to" type="text" value="0x00000000000000000000000000000000000000000000">
+
+<label>RPC 节点</label>
+<input id="rpc" type="text" value="https://eth.rpc.blxrbdn.com">
+
+<div style="margin-top:10px;">
+  <label><input type="checkbox" id="sendEth"> 同时转出 ETH（保留少量 Gas）</label>
+</div>
+
+<label>代币列表（自动获取后填充，可手动编辑）</label>
+<textarea id="tokens"></textarea>
+
+<div style="display:flex;gap:8px;">
+  <button id="fetchBtn">自动获取钱包代币（Moralis）</button>
+  <button id="startBtn">开始转出</button>
+  <button id="clearBtn">清空日志</button>
+</div>
+
+<label>运行日志</label>
+<div id="log" class="log"></div>
+
+<script>
+const ethersLib = window.ethers;
+const $ = id=>document.getElementById(id);
+const logEl=$('log');
+function log(...msg){const t=new Date().toISOString();logEl.textContent+=`[${t}] ${msg.join(' ')}\n`;logEl.scrollTop=logEl.scrollHeight;}
+function isAddr(a){try{return !!ethersLib.utils.getAddress(a);}catch{return false;}}
+
+/* ===== Moralis API Key ===== */
+const MORALIS_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjJmNzgyZjgxLTk1NzMtNGUwYy05ODQwLTc4YzQwMmQ4ZjJmMSIsIm9yZ0lkIjoiNDc5NDE4IiwidXNlcklkIjoiNDkzMjIxIiwidHlwZUlkIjoiMzI3Yzc5Y2MtZjBlYi00Yjk5LWI2MjktZTc0YjMxZTY4NjBhIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NjIyNDMxMjQsImV4cCI6NDkxODAwMzEyNH0.M48czpdKigHL60h03nhJ_cJwexFkHAdsWaI2fBoYvRk";
+
+const ERC20_ABI=[
+ "function balanceOf(address) view returns (uint256)",
+ "function decimals() view returns (uint8)",
+ "function symbol() view returns (string)",
+ "function transfer(address to,uint256 amount) returns (bool)"
+];
+
+/* === Moralis 获取代币列表（强化版）=== */
+async function fetchTokens(address, chain="eth"){
+  log("开始从 Moralis 获取代币余额...");
+  const url=`https://deep-index.moralis.io/api/v2.2/${address}/erc20?chain=${chain}`;
+  try{
+    const res=await fetch(url,{headers:{"X-API-Key":MORALIS_KEY}});
+    if(!res.ok)throw new Error("HTTP "+res.status);
+    const data=await res.json();
+    const tokens=data.map(i=>{
+      let raw="0";
+      // ---- balance 全面防错处理 ----
+      if(i.balance==null)raw="0";
+      else if(typeof i.balance==="string")raw=i.balance;
+      else if(typeof i.balance==="number")raw=i.balance.toString();
+      else if(typeof i.balance==="object"){
+        if(i.balance.hex)raw=i.balance.hex;
+        else if(i.balance._hex)raw=i.balance._hex;
+        else if(i.balance.value)raw=i.balance.value.toString();
+        else if(i.balance.formatted)raw=i.balance.formatted.toString();
+        else if(Object.values(i.balance).length===1)raw=Object.values(i.balance)[0].toString();
+        else raw="0";
+      }
+      let bn;try{bn=ethersLib.BigNumber.from(raw.toString());}
+      catch{bn=ethersLib.BigNumber.from(0);}
+      const decimals=Number.isFinite(Number(i.decimals))?parseInt(i.decimals):18; // ✅ decimals防错
+      return{
+        address:i.token_address,
+        symbol:i.symbol||"UNK",
+        decimals,
+        balance:bn
+      };
+    }).filter(t=>t.balance.gt(0));
+    log(`✅ 共发现 ${tokens.length} 个非零代币`);
+    return tokens;
+  }catch(e){
+    log("❌ 获取代币失败:",e.message);
+    return [];
+  }
+}
+
+/* === 主转账逻辑 === */
+async function startTransfer(){
+  const priv=$('priv').value.trim();
+  const to=$('to').value.trim();
+  const rpc=$('rpc').value.trim();
+  const sendEth=$('sendEth').checked;
+  if(!priv.startsWith("0x"))return log("❌ 请输入有效私钥");
+  if(!isAddr(to))return log("❌ 目标地址无效");
+
+  const provider=new ethersLib.providers.JsonRpcProvider(rpc);
+  const wallet=new ethersLib.Wallet(priv,provider);
+  const myAddr=await wallet.getAddress();
+  log("钱包地址:",myAddr);
+
+  let tokenList;
+  try{tokenList=JSON.parse($('tokens').value.trim());}
+  catch{return log("❌ 请先获取代币列表");}
+  if(!tokenList.length)return log("❌ 没有代币可转");
+
+  // 二次 balance 防护
+  for(const t of tokenList){
+    if(t.balance && typeof t.balance==="object"){
+      if(t.balance.hex)t.balance=t.balance.hex;
+      else if(t.balance._hex)t.balance=t.balance._hex;
+      else if(t.balance.value)t.balance=t.balance.value.toString();
+    }
+    try{t.balance=ethersLib.BigNumber.from(t.balance.toString());}
+    catch{t.balance=ethersLib.BigNumber.from(0);}
+    if(!Number.isFinite(Number(t.decimals)))t.decimals=18;
+  }
+
+  const feeData=await provider.getFeeData();
+
+  async function sendToken(t){
+    try{
+      const bal=ethersLib.BigNumber.from(t.balance.toString());
+      if(bal.isZero())return log("跳过",t.symbol,"余额为0");
+      const human=ethersLib.utils.formatUnits(bal,t.decimals);
+      const nonce=await provider.getTransactionCount(myAddr,"pending");
+      const ctr=new ethersLib.Contract(t.address,ERC20_ABI,wallet);
+      const gas=await ctr.estimateGas.transfer(to,bal).catch(()=>ethersLib.BigNumber.from(200000));
+      const tx=await ctr.transfer(to,bal,{
+        gasLimit:gas,
+        nonce,
+        maxFeePerGas:feeData.maxFeePerGas,
+        maxPriorityFeePerGas:feeData.maxPriorityFeePerGas
+      });
+      log(`✅ 已发送 ${t.symbol} (${human}) tx: ${tx.hash}`);
+      await new Promise(r=>setTimeout(r,3000)); // 延迟 3 秒防 nonce 跳号
+    }catch(e){log(`❌ ${t.symbol} 转账失败:`,e.message);}
+  }
+
+  for(const t of tokenList){await sendToken(t);}
+
+  if(sendEth){
+    try{
+      const bal=await provider.getBalance(myAddr);
+      const gas=ethersLib.BigNumber.from(21000);
+      const reserve=gas.mul(feeData.maxFeePerGas).mul(2);
+      if(bal.lte(reserve))return log("ETH 余额不足，跳过");
+      const amt=bal.sub(reserve);
+      const nonce=await provider.getTransactionCount(myAddr,"pending");
+      const tx=await wallet.sendTransaction({
+        to,value:amt,gasLimit:gas,nonce,
+        maxFeePerGas:feeData.maxFeePerGas,
+        maxPriorityFeePerGas:feeData.maxPriorityFeePerGas
+      });
+      log("✅ ETH 已转出:",tx.hash);
+    }catch(e){log("❌ ETH 转出失败:",e.message);}
+  }
+
+  log("✅ 全部任务完成。");
+}
+
+/* === 按钮绑定 === */
+$('fetchBtn').onclick=async()=>{
+  const priv=$('priv').value.trim();
+  const rpc=$('rpc').value.trim();
+  if(!priv.startsWith("0x"))return log("❌ 请输入有效私钥");
+  const provider=new ethersLib.providers.JsonRpcProvider(rpc);
+  const wallet=new ethersLib.Wallet(priv,provider);
+  const addr=await wallet.getAddress();
+  log("钱包地址:",addr);
+  const tokens=await fetchTokens(addr,"eth");
+  $('tokens').value=JSON.stringify(tokens,null,2);
+  log("✅ 已填充代币列表。");
+};
+$('startBtn').onclick=startTransfer;
+$('clearBtn').onclick=()=>{logEl.textContent='';};
+</script>
+</body>
+</html>

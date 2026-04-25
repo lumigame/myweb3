@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>批量出售 ERC20 → ETH（浏览器版，Moralis 自动发现代币）</title>
+<!-- ethers v5 -->
+<script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+<style>
+body{font-family:"Microsoft YaHei",Arial,Helvetica,sans-serif;max-width:1100px;margin:18px auto;padding:18px;}
+h1{font-size:20px;margin-bottom:6px;}
+label{display:block;margin-top:10px;font-weight:600;}
+input[type=text], input[type=password], textarea, select {width:100%;padding:8px;margin-top:6px;box-sizing:border-box;font-size:14px;}
+textarea{min-height:120px;font-family:monospace;}
+button{padding:8px 12px;margin:8px 6px 8px 0;border-radius:6px;border:1px solid #444;background:#f5f5f5;cursor:pointer;}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+.log{background:#111;color:#e6e6e6;padding:10px;border-radius:6px;white-space:pre-wrap;height:320px;overflow:auto;font-family:monospace;font-size:13px;}
+.small{font-size:12px;color:#666;margin-top:6px;}
+.row{display:flex;gap:12px;align-items:center;}
+.col{flex:1;}
+.token-list{height:180px;overflow:auto;border:1px solid #ddd;padding:8px;border-radius:6px;background:#fff;}
+.token-item{padding:6px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;align-items:center;}
+.token-item:last-child{border-bottom:none;}
+.checkbox{margin-right:8px;}
+.badge{font-size:12px;color:#555;padding:2px 6px;border-radius:4px;background:#eee}
+.note{font-size:13px;color:#333;margin-top:8px}
+</style>
+</head>
+<body>
+<h1>批量出售 ERC20 → ETH（浏览器版）</h1>
+<p class="small">说明：页面直接在浏览器执行。请先部署为 HTTPS 并确认环境安全。建议先在测试网、小额资金测试。</p>
+
+<label>RPC 节点（可改）</label>
+<input id="rpc" type="text" value="https://ethereum.publicnode.com">
+
+<label>Moralis API Key（已自动填充，可替换）</label>
+<input id="moralisKey" type="text" value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjJmNzgyZjgxLTk1NzMtNGUwYy05ODQwLTc4YzQwMmQ4ZjJmMSIsIm9yZ0lkIjoiNDc5NDE4IiwidXNlcklkIjoiNDkzMjIxIiwidHlwZUlkIjoiMzI3Yzc5Y2MtZjBlYi00Yjk5LWI2MjktZTc0YjMxZTY4NjBhIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NjIyNDMxMjQsImV4cCI6NDkxODAwMzEyNH0.M48czpdKigHL60h03nhJ_cJwexFkHAdsWaI2fBoYvRk">
+
+<label>钱包私钥（每行一个私钥，或只填一个私钥）</label>
+<textarea id="privKeys" placeholder="0x...（私钥请勿泄露给他人）"></textarea>
+
+<label>目标接收地址（ETH 收款地址，默认填写钱包本身）</label>
+<input id="target" type="text" value='0x00000000000000000000000000000' placeholder="不填则自动使用钱包地址">
+
+<div class="row">
+  <div class="col">
+    <label>滑点（百分比，默认 3%）</label>
+    <input id="slippage" type="text" value="3">
+  </div>
+  <div style="width:220px">
+    <label>单钱包最小尝试余额（最小单位，默认 1）</label>
+    <input id="minBalance" type="text" value="1">
+  </div>
+</div>
+
+<label>UniswapV2 Router 地址（默认主网）</label>
+<input id="router" type="text" value="0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D">
+
+<div class="controls">
+  <button id="btnFetch">从 Moralis 自动获取代币（所有钱包）</button>
+  <button id="btnApproveAll">对选中代币执行无限授权（Approve Max）</button>
+  <button id="btnSellSelected">对选中代币执行全部卖出（swap → ETH）</button>
+  <button id="btnSellAll">对列表中所有代币全部卖出</button>
+  <button id="btnClearLog">清空日志</button>
+</div>
+
+<label>代币检测/选择（从 Moralis 自动获取后显示）</label>
+<div id="tokenContainer" class="token-list"></div>
+
+<p class="note">注意：默认会对所选代币先做无限授权（approve max），然后调用 UniswapV2 的 swapExactTokensForETHSupportingFeeOnTransferTokens 卖成 ETH。建议先测试少量代币。</p>
+
+<label>运行日志</label>
+<div id="log" class="log"></div>
+
+<script>
+/*
+  浏览器端批量出售脚本（中文注释）
+  - 在页面输入私钥，点击“从 Moralis 自动获取代币”会为每个钱包拉取 ERC-20 持仓并去重合并展示
+  - 用户可以选择要出售的代币（多选），也可以一键全部出售
+  - 默认对每个代币先执行无限授权（approve MaxUint256）
+  - 使用 UniswapV2 Router 的 swapExactTokensForETHSupportingFeeOnTransferTokens 执行出售（兼容费率代币）
+  - 提供基础的 nonce 动态获取与延迟，降低 nonce 冲突概率
+  - 所有注释为中文，禁止特殊表情
+*/
+
+const ethersLib = window.ethers;
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+function log(...parts) {
+  const t = new Date().toISOString();
+  logEl.textContent += `[${t}] ${parts.join(' ')}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function clearLog(){ logEl.textContent = ''; }
+
+// 工具函数：sleep
+function sleep(ms){ return new Promise(res=>setTimeout(res,ms)); }
+
+// 读取输入的私钥数组（可能多行）
+function readPrivateKeys(){
+  const raw = $('privKeys').value.trim();
+  if(!raw) return [];
+  return raw.split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>0);
+}
+
+// 基本配置
+const DEFAULT_WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; // mainnet WETH
+const ERC20_ABI = [
+  "function approve(address spender, uint256 amount) external returns (bool)",
+  "function allowance(address owner, address spender) external view returns (uint256)",
+  "function balanceOf(address owner) external view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)"
+];
+const UNISWAP_ROUTER_ABI = [
+  "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)",
+  "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external"
+];
+
+// Moralis API Key（由你提供）
+function getMoralisKey(){ return $('moralisKey').value.trim(); }
+
+// 获取并合并所有私钥的代币列表（去重）
+async function fetchAllTokensForKeys(keys){
+  const rpc = $('rpc').value.trim() || $('rpc').placeholder;
+  const moralisKey = getMoralisKey();
+  if(!moralisKey){ log("请填写 Moralis API Key"); return []; }
+  const chain = "eth";
+  const allMap = {}; // addressLower -> tokenEntry { address, symbol, decimals, totalBalance (BigNumber) }
+  for(let i=0;i<keys.length;i++){
+    const pk = keys[i];
+    try{
+      const wallet = new ethersLib.Wallet(pk);
+      const addr = await wallet.getAddress();
+      log(`开始抓取 ${addr} 的代币...`);
+      const url = `https://deep-index.moralis.io/api/v2.2/${addr}/erc20?chain=${chain}`;
+      // 发请求
+      let res;
+      try{
+        res = await fetch(url, { headers: { "X-API-Key": moralisKey }});
+      }catch(e){
+        log("网络请求失败:", e.message || e);
+        continue;
+      }
+      if(!res.ok){
+        log("Moralis 返回 HTTP 错误:", res.status, await res.text());
+        continue;
+      }
+      const data = await res.json();
+      if(!Array.isArray(data) || data.length===0){
+        log(`无代币或 Moralis 返回空数组，地址: ${addr}`);
+        continue;
+      }
+      // 解析每个 token，兼容多种 balance 格式
+      for(const item of data){
+        const tokenAddr = (item.token_address || item.address || item.contract_address || "").toLowerCase();
+        if(!tokenAddr) continue;
+        // 处理 balance 各种格式
+        let raw = "0";
+        if(item.balance == null) raw = "0";
+        else if(typeof item.balance === "string") raw = item.balance;
+        else if(typeof item.balance === "number") raw = String(item.balance);
+        else if(typeof item.balance === "object"){
+          if(item.balance.hex) raw = item.balance.hex;
+          else if(item.balance._hex) raw = item.balance._hex;
+          else if(item.balance.value) raw = String(item.balance.value);
+          else if(item.balance.formatted) raw = String(item.balance.formatted);
+          else {
+            const vals = Object.values(item.balance);
+            if(vals.length===1) raw = String(vals[0]);
+            else raw = "0";
+          }
+        } else raw = "0";
+        // 转 BigNumber
+        let bn;
+        try{ bn = ethersLib.BigNumber.from(raw.toString()); } catch { bn = ethersLib.BigNumber.from(0); }
+        if(bn.lte(0)) continue;
+        // decimals 安全处理
+        const decimals = Number.isFinite(Number(item.decimals)) ? parseInt(item.decimals) : 18;
+        const symbol = item.symbol || item.name || "UNK";
+        if(!allMap[tokenAddr]){
+          allMap[tokenAddr] = { address: tokenAddr, symbol, decimals, balance: bn };
+        } else {
+          allMap[tokenAddr].balance = allMap[tokenAddr].balance.add(bn);
+        }
+      }
+      // 小延迟避免速率限制
+      await sleep(400);
+    }catch(e){
+      log("抓取私钥第",i,"个失败:", (e && e.message) ? e.message : String(e));
+      continue;
+    }
+  }
+  // 转成数组并按余额排序
+  const arr = Object.values(allMap).sort((a,b)=> {
+    try{
+      if(a.balance.gt(b.balance)) return -1;
+      if(a.balance.lt(b.balance)) return 1;
+      return 0;
+    }catch(e){ return 0; }
+  });
+  log(`合并后共 ${arr.length} 个代币（非零余额）`);
+  return arr;
+}
+
+// 在 UI 渲染代币列表
+function renderTokenList(tokens){
+  const container = $('tokenContainer');
+  container.innerHTML = '';
+  if(!tokens || tokens.length===0){
+    container.textContent = '未检测到代币或列表为空';
+    return;
+  }
+  for(const t of tokens){
+    const div = document.createElement('div');
+    div.className = 'token-item';
+    const left = document.createElement('div');
+    left.style.display='flex'; left.style.alignItems='center';
+    const cb = document.createElement('input');
+    cb.type='checkbox'; cb.checked=true; cb.className='checkbox';
+    cb.dataset.addr = t.address;
+    left.appendChild(cb);
+    const txt = document.createElement('span');
+    txt.textContent = `${t.symbol} (${t.address})`;
+    left.appendChild(txt);
+    const right = document.createElement('div');
+    const human = ethersLib.utils.formatUnits(t.balance, t.decimals);
+    const badge = document.createElement('span'); badge.className='badge';
+    badge.textContent = `${human} (dec:${t.decimals})`;
+    right.appendChild(badge);
+    div.appendChild(left);
+    div.appendChild(right);
+    container.appendChild(div);
+  }
+}
+
+// 从 UI 取选中代币地址数组
+function getSelectedTokenAddrs(){
+  const container = $('tokenContainer');
+  const checks = container.querySelectorAll('input[type=checkbox]');
+  const result = [];
+  checks.forEach(cb=>{
+    if(cb.checked) result.push(cb.dataset.addr);
+  });
+  return result;
+}
+
+// 查找 token 对象（从当前列表）
+function getTokenObjectByAddr(addr, tokenList){
+  if(!tokenList) return null;
+  const a = addr.toLowerCase();
+  return tokenList.find(t=>t.address.toLowerCase()===a) || null;
+}
+
+// 无限授权（approve MAX）函数
+async function approveIfNeeded(provider, wallet, tokenAddr, routerAddr, minApprove=false){
+  try{
+    const token = new ethersLib.Contract(tokenAddr, ERC20_ABI, wallet);
+    const owner = await wallet.getAddress();
+    const allowance = await token.allowance(owner, routerAddr);
+    if(allowance && allowance.gt(ethersLib.constants.Zero) && !minApprove){
+      log(`已有授权，略过 approve: ${tokenAddr} allowance=${allowance.toString()}`);
+      return true;
+    }
+    const MAX = ethersLib.constants.MaxUint256;
+    const nonce = await provider.getTransactionCount(owner,'pending');
+    const tx = await token.approve(routerAddr, MAX, { nonce });
+    log(`发送 approve tx: ${tx.hash} -> token ${tokenAddr}`);
+    await tx.wait(1);
+    log(`approve 确认: ${tx.hash}`);
+    // 小延迟
+    await sleep(1200);
+    return true;
+  }catch(e){
+    log("approve 失败:", (e && e.message) ? e.message : String(e));
+    return false;
+  }
+}
+
+// 计算 amountOutMin（getAmountsOut + 滑点）
+async function computeAmountOutMin(routerContract, amountIn, path, slippagePercent){
+  try{
+    const amounts = await routerContract.getAmountsOut(amountIn, path);
+    const amountOut = amounts[amounts.length - 1];
+    const mul = ethersLib.BigNumber.from(Math.max(0, Math.floor((100 - slippagePercent) * 100)));
+    // mul is (100 - slip)*100, denominator 10000
+    const amountOutMin = amountOut.mul(mul).div(10000);
+    return amountOutMin;
+  }catch(e){
+    // 返回 0 表示放弃最小值校验，适用于低流动性或 getAmountsOut 失败
+    log("getAmountsOut 失败，可能流动性不足，错误:", (e && e.message) ? e.message : String(e));
+    return ethersLib.BigNumber.from(0);
+  }
+}
+
+// 执行单个代币从钱包全部卖成 ETH（先授权 -> swap）
+async function swapTokenAllToETH(provider, walletPriv, tokenObj, routerAddr, slippagePercent, targetAddr){
+  const wallet = new ethersLib.Wallet(walletPriv, provider);
+  const owner = await wallet.getAddress();
+  try{
+    const token = new ethersLib.Contract(tokenObj.address, ERC20_ABI, wallet);
+    const router = new ethersLib.Contract(routerAddr, UNISWAP_ROUTER_ABI, wallet);
+    // 读取余额（再次确认）
+    let rawBal;
+    try{ rawBal = await token.balanceOf(owner); } catch(e){ log("读取余额失败:", (e && e.message) ? e.message : String(e)); return false; }
+    let balanceBN;
+    try{ balanceBN = ethersLib.BigNumber.from(rawBal.toString()); }catch{ balanceBN = ethersLib.BigNumber.from(0); }
+    if(balanceBN.lte(ethersLib.BigNumber.from(0))){ log("余额为 0，跳过:", tokenObj.symbol); return false; }
+    const human = ethersLib.utils.formatUnits(balanceBN, tokenObj.decimals);
+    log(`钱包 ${owner} 准备出售 ${tokenObj.symbol} 全部余额 ${human}`);
+
+    // 授权
+    const okApprove = await approveIfNeeded(provider, wallet, tokenObj.address, routerAddr);
+    if(!okApprove){ log("授权失败，跳过卖出:", tokenObj.symbol); return false; }
+
+    // 构造路径 token -> WETH
+    const path = [ tokenObj.address, DEFAULT_WETH ];
+    // 计算最小输出
+    const amountOutMin = await computeAmountOutMin(router, balanceBN, path, slippagePercent);
+
+    // 获取 nonce（pending）
+    let nonce = await provider.getTransactionCount(owner, 'pending');
+
+    // 发送 swapExactTokensForETHSupportingFeeOnTransferTokens
+    const deadline = Math.floor(Date.now()/1000) + 60*20; // 20 分钟
+    let tx;
+    try{
+      tx = await router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+        balanceBN,
+        amountOutMin,
+        path,
+        targetAddr || owner,
+        deadline,
+        {
+          nonce,
+          gasLimit: ethersLib.BigNumber.from(800000)
+        }
+      );
+    }catch(e){
+      log("swap 发送失败:", (e && e.message) ? e.message : String(e));
+      return false;
+    }
+    log(`swap tx 已发送: ${tx.hash} （等待 1 个块确认）`);
+    try{
+      await tx.wait(1);
+      log(`swap 确认: ${tx.hash}`);
+    }catch(e){
+      log(`swap 等待确认失败（但交易可能已广播）: ${tx.hash} 错误:`, (e && e.message) ? e.message : String(e));
+    }
+    // 小等待，确保 RPC pending/nonce 状态更新
+    await sleep(1500);
+    return true;
+  }catch(e){
+    log("swapTokenAllToETH 异常:", (e && e.message) ? e.message : String(e));
+    return false;
+  }
+}
+
+/* ========== UI 事件绑定 ========== */
+
+let currentTokenList = []; // 全局保存当前合并代币列表
+
+$('btnFetch').addEventListener('click', async ()=>{
+  clearLog();
+  const keys = readPrivateKeys();
+  if(keys.length===0){ log("请先在 私钥 输入框 填入一个或多个私钥（每行一个）"); return; }
+  log("开始为所有私钥获取并合并代币列表...");
+  currentTokenList = await fetchAllTokensForKeys(keys);
+  renderTokenList(currentTokenList);
+});
+
+$('btnApproveAll').addEventListener('click', async ()=>{
+  clearLog();
+  const keys = readPrivateKeys();
+  if(keys.length===0){ log("请先输入私钥"); return; }
+  const selectedAddrs = getSelectedTokenAddrs();
+  if(selectedAddrs.length===0){ log("请先选择代币"); return; }
+  const routerAddr = $('router').value.trim();
+  const rpc = $('rpc').value.trim();
+  const provider = new ethersLib.providers.JsonRpcProvider(rpc);
+  // 对每个私钥、每个代币执行授权
+  for(const pk of keys){
+    const wallet = new ethersLib.Wallet(pk, provider);
+    const owner = await wallet.getAddress();
+    log(`开始对钱包 ${owner} 执行授权（选中代币 ${selectedAddrs.length} 个）`);
+    for(const ta of selectedAddrs){
+      const tokenObj = getTokenObjectByAddr(ta, currentTokenList);
+      if(!tokenObj) { log("未找到代币对象:", ta); continue; }
+      await approveIfNeeded(provider, wallet, tokenObj.address, routerAddr);
+      await sleep(800);
+    }
+    await sleep(1200);
+  }
+  log("全部授权流程结束（每个钱包）");
+});
+
+$('btnSellSelected').addEventListener('click', async ()=>{
+  clearLog();
+  const keys = readPrivateKeys();
+  if(keys.length===0){ log("请先输入私钥"); return; }
+  const selectedAddrs = getSelectedTokenAddrs();
+  if(selectedAddrs.length===0){ log("请先选择代币"); return; }
+  const routerAddr = $('router').value.trim();
+  const rpc = $('rpc').value.trim();
+  const slippage = Number($('slippage').value.trim() || '3');
+  const minBalance = $('minBalance').value.trim() || '1';
+  const target = $('target').value.trim() || null;
+  const provider = new ethersLib.providers.JsonRpcProvider(rpc);
+
+  log(`开始出售选中代币（滑点 ${slippage}%），钱包数量: ${keys.length}`);
+  for(const pk of keys){
+    const wallet = new ethersLib.Wallet(pk, provider);
+    const owner = await wallet.getAddress();
+    log(`处理钱包 ${owner}`);
+    for(const ta of selectedAddrs){
+      const tokenObj = getTokenObjectByAddr(ta, currentTokenList);
+      if(!tokenObj) { log("找不到代币对象，跳过:", ta); continue; }
+      // 最小余额过滤：在当前钱包上的实际余额可能为0或小于阈值
+      // 我们在 swapTokenAllToETH 内会再次读取余额并跳过0
+      // 先作一次大致检查（基于合并余额）
+      if(tokenObj.balance.lt(ethersLib.BigNumber.from(minBalance))){ log("合并余额低于阈值，跳过:", tokenObj.symbol); continue; }
+      await swapTokenAllToETH(provider, pk, tokenObj, routerAddr, slippage, target);
+      // 每个 token 在同一钱包间稍候以避免 nonce 冲突
+      await sleep(1600);
+    }
+    // 每个钱包间再等一会儿
+    await sleep(2000);
+  }
+  log("选中代币出售完成。");
+});
+
+$('btnSellAll').addEventListener('click', async ()=>{
+  clearLog();
+  const keys = readPrivateKeys();
+  if(keys.length===0){ log("请先输入私钥"); return; }
+  if(!currentTokenList || currentTokenList.length===0){ log("请先点击从 Moralis 自动获取代币并生成列表"); return; }
+  const addrs = currentTokenList.map(t=>t.address);
+  // 模拟全选再调用上面逻辑
+  // 暂时重用 swapSelected 的流程：逐钱包卖出 currentTokenList
+  const routerAddr = $('router').value.trim();
+  const rpc = $('rpc').value.trim();
+  const slippage = Number($('slippage').value.trim() || '3');
+  const target = $('target').value.trim() || null;
+  const provider = new ethersLib.providers.JsonRpcProvider(rpc);
+
+  log(`开始出售全部代币（共 ${currentTokenList.length} 个代币），钱包数量: ${readPrivateKeys().length}`);
+  for(const pk of readPrivateKeys()){
+    const wallet = new ethersLib.Wallet(pk, provider);
+    const owner = await wallet.getAddress();
+    log(`处理钱包 ${owner}`);
+    for(const tokenObj of currentTokenList){
+      await swapTokenAllToETH(provider, pk, tokenObj, routerAddr, slippage, target);
+      await sleep(1600);
+    }
+    await sleep(2000);
+  }
+  log("全部代币出售完成。");
+});
+
+$('btnClearLog').addEventListener('click', ()=>{ clearLog(); });
+
+/* 初始化空状态 */
+renderTokenList([]);
+log("界面加载完成。请先填写私钥并点击“从 Moralis 自动获取代币（所有钱包）”。");
+</script>
+</body>
+</html>

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Wallet USD Value Scanner (Moralis) - Correct BIP44 Derivation</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding: 18px; background:#f7f8fa; color:#111; }
+    h1 { font-size: 18px; margin-bottom: 8px; }
+    label { display:block; margin-top:10px; font-size:13px; }
+    textarea, input, select, button { font-family: inherit; font-size:13px; }
+    textarea { width:100%; min-height:160px; padding:10px; border-radius:6px; border:1px solid #ddd; box-sizing:border-box; background:#fff; }
+    .controls { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center; }
+    .small { width:140px; }
+    .btn { padding:8px 12px; border-radius:6px; border:1px solid #2b6cb0; background:#3182ce; color:white; cursor:pointer; }
+    .btn.secondary { background:#edf2f7; color:#111; border-color:#cbd5e1; }
+    .log { margin-top:12px; white-space:pre-wrap; background:#0f1724; color:#e6edf3; padding:10px; border-radius:6px; min-height:180px; font-family: monospace; font-size:12px; overflow:auto; }
+    .row { display:flex; gap:8px; align-items:center; margin-top:6px; }
+    .muted { color:#6b7280; font-size:12px; }
+    .hint { font-size:12px; color:#374151; margin-top:6px; }
+  </style>
+  <!-- Ethers.js v6 -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.9.2/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+  <h1>钱包 USD 市值循环查询（Moralis）</h1>
+  <div class="muted">助记词模式采用标准派生路径 m/44'/60'/0'/0/{index}，默认从 index=0 开始，生成前 N 个地址。</div>
+
+  <label>选择输入类型：</label>
+  <div class="row">
+    <label><input type="radio" name="type" value="mnemonic" checked /> 助记词（每行一个）</label>
+    <label style="margin-left:12px;"><input type="radio" name="type" value="private" /> 私钥（每行一个）</label>
+  </div>
+
+  <label>输入（每行一个）：</label>
+  <textarea id="inputArea" placeholder="在此粘贴每行一个助记词或私钥"></textarea>
+
+  <div class="controls">
+    <label class="small">Chain:
+      <select id="chainSelect">
+        <option value="eth">ethereum</option>
+        <option value="bsc">bsc</option>
+        <option value="polygon">polygon</option>
+      </select>
+    </label>
+
+    <label class="small">间隔（秒）:
+      <input id="intervalSec" type="number" min="5" value="30" style="width:70px;" />
+    </label>
+
+    <label class="small">并发:
+      <input id="concurrency" type="number" min="1" value="3" style="width:70px;" />
+    </label>
+
+    <label class="small">startIndex:
+      <input id="startIndex" type="number" min="0" value="0" style="width:70px;" />
+    </label>
+
+    <label class="small">Count (N):
+      <input id="countN" type="number" min="1" value="5" style="width:70px;" />
+    </label>
+
+    <button id="startBtn" class="btn">Start</button>
+    <button id="stopBtn" class="btn secondary" disabled>Stop</button>
+
+    <label style="margin-left:12px;">
+      <input id="includeNative" type="checkbox" checked /> 包含原生币（如 ETH）
+    </label>
+  </div>
+
+  <div class="hint">助记词模式将派生地址：m/44'/60'/0'/0/{startIndex..startIndex+N-1}。私钥模式忽略 startIndex / N。</div>
+
+  <label style="margin-top:12px;">日志输出：</label>
+  <div id="log" class="log"></div>
+
+  <script>
+    // English comments only in code.
+    // This page:
+    // - Uses strict BIP44 path m/44'/60'/0'/0/{index} with ethers v6 fromPhrase(..., ..., path)
+    // - Derives N addresses per mnemonic starting at startIndex
+    // - Private key mode: one key -> one address
+    // - Queries Moralis wallet token balances with USD valuation
+    // - Logs results in-page without console.log or alert
+
+    // ----- CONFIG -----
+    const MORALIS_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjJmNzgyZjgxLTk1NzMtNGUwYy05ODQwLTc4YzQwMmQ4ZjJmMSIsIm9yZ2lkIjoiNDc5NDE4IiwidXNlcklkIjoiNDkzMjIxIiwidHlwZUlkIjoiMzI3Yzc5Y2MtZjBlYi00Yjk5LWI2MjktZTc0YjMxZTY4NjBhIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NjIyNDMxMjQsImV4cCI6NDkxODAwMzEyNH0.M48czpdKigHL60h03nhJ_cJwexFkHAdsWaI2fBoYvRk";
+    const MORALIS_TOKENS_URL = (address, chain) => `https://deep-index.moralis.io/api/v2.2/wallets/${address}/tokens?chain=${chain}&limit=200`;
+
+    // ----- UI -----
+    const inputArea = document.getElementById("inputArea");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const logEl = document.getElementById("log");
+    const intervalSecEl = document.getElementById("intervalSec");
+    const concurrencyEl = document.getElementById("concurrency");
+    const chainSelect = document.getElementById("chainSelect");
+    const includeNativeEl = document.getElementById("includeNative");
+    const startIndexEl = document.getElementById("startIndex");
+    const countNEl = document.getElementById("countN");
+
+    let running = false;
+
+    function appendLog(text) {
+      const ts = new Date().toLocaleString();
+      logEl.textContent = `[${ts}] ${text}\n` + logEl.textContent;
+    }
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // ----- Derivation helpers -----
+    function deriveEthAddressAtIndexBip44(mnemonic, index) {
+      // Use standard BIP44 derivation path for Ethereum
+      const path = `m/44'/60'/0'/0/${index}`;
+      try {
+        const w = ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), undefined, path);
+        return w.address;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function addressFromPrivateKey(pk) {
+      try {
+        let key = pk.trim();
+        if (!key.startsWith("0x")) key = "0x" + key;
+        return (new ethers.Wallet(key)).address;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // ----- Moralis fetch + valuation -----
+    async function fetchTokensForAddress(address, chain, includeNative=true) {
+      const url = MORALIS_TOKENS_URL(address, chain) + (includeNative ? "" : "&exclude_native=true");
+      const res = await fetch(url, {
+        method: "GET",
+        headers: { "Content-Type": "application/json", "X-API-Key": MORALIS_API_KEY }
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt}`);
+      }
+      const j = await res.json();
+      return j.result || [];
+    }
+
+    function computeUsdTotalFromTokens(tokens) {
+      let total = 0;
+      const breakdown = [];
+      for (const token of tokens) {
+        let usdValue = 0;
+        if (token.usd_value !== undefined && token.usd_value !== null) {
+          usdValue = Number(token.usd_value) || 0;
+        } else {
+          const price = token.usd_price ? Number(token.usd_price) : 0;
+          try {
+            const decimals = (token.decimals ?? 0);
+            const balStr = token.balance ? String(token.balance) : "0";
+            const human = ethers.formatUnits(balStr, Number(decimals));
+            usdValue = price * (Number(human) || 0);
+          } catch (_) {
+            usdValue = 0;
+          }
+        }
+        total += usdValue;
+        breakdown.push({
+          symbol: token.symbol || token.contract_ticker_symbol || token.name || token.contract_address,
+          usd_value: usdValue
+        });
+      }
+      return { total, breakdown };
+    }
+
+    async function processAddress(address, chain) {
+      try {
+        appendLog(`地址 ${address} - 开始查询`);
+        const tokens = await fetchTokensForAddress(address, chain, includeNativeEl.checked);
+        const { total, breakdown } = computeUsdTotalFromTokens(tokens);
+        appendLog(`地址 ${address} - USD 总市值: $${Number(total).toLocaleString(undefined, {maximumFractionDigits:2})}`);
+        const top = breakdown.slice(0, 8).map(t => `${t.symbol}: $${Number(t.usd_value).toLocaleString(undefined, {maximumFractionDigits:2})}`);
+        appendLog(top.length ? `  代币分解（示例）: ${top.join(" | ")}` : `  未检测到代币或价格信息`);
+      } catch (err) {
+        appendLog(`地址 ${address} - 查询出错: ${err.message || err}`);
+      }
+    }
+
+    // ----- Build address list -----
+    function buildAddresses(type, startIndex, countN) {
+      const lines = inputArea.value.split("\n").map(s => s.trim()).filter(Boolean);
+      const addrs = [];
+      for (const line of lines) {
+        if (type === "mnemonic") {
+          for (let k = 0; k < countN; k++) {
+            const idx = startIndex + k;
+            const a = deriveEthAddressAtIndexBip44(line, idx);
+            if (a) addrs.push(a);
+            else appendLog(`助记词派生失败: ${line.slice(0,20)}... (index ${idx})`);
+          }
+        } else {
+          const a = addressFromPrivateKey(line);
+          if (a) addrs.push(a);
+          else appendLog(`私钥解析失败: ${line.slice(0,20)}...`);
+        }
+      }
+      return Array.from(new Set(addrs));
+    }
+
+    async function runCycle(addresses, chain, concurrency) {
+      appendLog(`开始一轮查询：${addresses.length} 个地址，并发 ${concurrency}`);
+      let i = 0;
+      const workers = new Array(Math.min(concurrency, addresses.length)).fill(null).map(async () => {
+        while (i < addresses.length) {
+          const idx = i++;
+          await processAddress(addresses[idx], chain);
+          await sleep(350);
+        }
+      });
+      await Promise.all(workers);
+      appendLog(`本轮查询完成`);
+    }
+
+    async function startLoop() {
+      if (running) return;
+      const type = document.querySelector('input[name="type"]:checked').value;
+      const intervalSec = Math.max(5, Number(intervalSecEl.value) || 30);
+      const concurrency = Math.max(1, Number(concurrencyEl.value) || 1);
+      const chain = chainSelect.value || "eth";
+      const startIndex = Math.max(0, Number(startIndexEl.value) || 0);
+      const countN = Math.max(1, Number(countNEl.value) || 1);
+
+      const addresses = buildAddresses(type, startIndex, countN);
+      if (!addresses.length) {
+        appendLog("没有可用地址，请检查输入。");
+        return;
+      }
+
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      appendLog(`启动循环查询，间隔 ${intervalSec}s，地址数 ${addresses.length}`);
+
+      try { await runCycle(addresses, chain, concurrency); } catch (e) { appendLog(`运行错误: ${e.message || e}`); }
+
+      (async () => {
+        while (running) {
+          await sleep(intervalSec * 1000);
+          if (!running) break;
+          try { await runCycle(addresses, chain, concurrency); } catch (e) { appendLog(`运行错误: ${e.message || e}`); }
+        }
+      })();
+    }
+
+    function stopLoop() {
+      running = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      appendLog("已停止循环查询");
+    }
+
+    startBtn.addEventListener("click", () => { startLoop().catch(e => appendLog("Start error: " + (e.message || e))); });
+    stopBtn.addEventListener("click", stopLoop);
+
+    // Placeholder content
+    inputArea.placeholder = `示例（助记词/私钥每行一个）：\n\n# 助记词：\nabandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\n\n# 私钥：\n0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n`;
+  </script>
+</body>
+</html>

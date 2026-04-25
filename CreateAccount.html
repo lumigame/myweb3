@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>HD Wallet — Private Keys Log</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: "Segoe UI", Roboto, "Microsoft YaHei", Arial; padding:18px; max-width:980px; margin:auto; color:#222; }
+    h1 { font-size:20px; margin-bottom:6px; }
+    label { display:block; margin-top:12px; font-size:14px; }
+    input[type="text"], input[type="number"], textarea, select { width:100%; padding:8px; box-sizing:border-box; margin-top:6px; font-size:14px; }
+    button { margin-top:12px; padding:10px 14px; border-radius:8px; background:#2b7cff; color:#fff; border:none; cursor:pointer; font-weight:600; }
+    button:disabled { opacity:0.6; cursor:not-allowed; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .small { font-size:12px; color:#666; margin-top:6px; }
+    .notice { margin-top:10px; padding:10px; background:#fff3cd; border:1px solid #ffeeba; color:#856404; border-radius:6px; }
+    .log-wrap { margin-top:14px; display:flex; gap:12px; align-items:flex-start; }
+    .log-area { flex:1; }
+    textarea.log { width:100%; height:260px; padding:10px; box-sizing:border-box; font-family:monospace; font-size:13px; white-space:pre; overflow:auto; }
+    .log-controls { display:flex; flex-direction:column; gap:8px; min-width:160px; }
+    .copy-btn { padding:8px 10px; border-radius:6px; border:1px solid #ccc; background:#fafafa; cursor:pointer;color:#0070f3;}
+    table { width:100%; border-collapse:collapse; margin-top:14px; font-size:13px; }
+    th, td { padding:8px 6px; border:1px solid #e6e6e6; text-align:left; vertical-align:top; }
+    pre { white-space:pre-wrap; word-break:break-word; margin:0; font-family:monospace; font-size:13px; }
+    .ok { color:#155724; background:#d4edda; border:1px solid #c3e6cb; padding:8px; border-radius:6px; margin-top:8px; display:inline-block; }
+  </style>
+
+  <!-- ethers v5 UMD bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+  <h1>HD Wallet — 私钥 Log（仅私钥）</h1>
+  <div class="small">说明：页面会把每个派生索引对应的私钥输出到下方 log 区（每行一个私钥），方便复制。请务必离线/安全使用。</div>
+
+  <label>助记词（Mnemonic）</label>
+  <textarea id="mnemonic" rows="2" placeholder="例如：abandon abandon ..."></textarea>
+
+  <label>派生路径模板（Derivation path template）</label>
+  <input id="pathTemplate" type="text" value="m/44'/60'/0'/0" />
+  <div class="small">示例：结果路径会是 <code>m/44'/60'/0'/0/0</code>, <code>m/44'/60'/0'/0/1</code> ...（最后加索引）</div>
+
+  <label>起始索引（start index）</label>
+  <input id="startIndex" type="number" value="0" min="0" />
+
+  <label>生成数量（count）</label>
+  <input id="count" type="number" value="5" min="1" max="200" />
+
+  <div class="actions">
+    <button id="generateBtn">生成并写入私钥 Log</button>
+    <button id="clearBtn" type="button">清空</button>
+  </div>
+
+  <div id="msg" class="notice" style="display:none;"></div>
+
+  <!-- Results table (addresses etc.) kept for reference, but user asked to show log only.
+       We still provide the table but the LOG area shows only private keys as requested. -->
+  <div id="resultArea"></div>
+
+  <div class="log-wrap" id="logWrap" style="display:none;">
+    <div class="log-area">
+      <label>私钥 Log（仅私钥 — 每行一个私钥）</label>
+      <textarea id="logArea" class="log" readonly placeholder="生成后私钥会显示在这里，每行一个私钥。"></textarea>
+      <div class="small">提示：复制全部可用右侧按钮「复制全部私钥」。</div>
+    </div>
+    <div class="log-controls">
+      <button id="copyAllBtn" class="copy-btn">复制全部私钥</button>
+      <button id="exportTxtBtn" class="copy-btn">导出为 .txt 文件</button>
+      <button id="showTableBtn" class="copy-btn">显示详细表格（地址/路径）</button>
+      <button id="hideTableBtn" class="copy-btn" style="display:none;">隐藏详细表格</button>
+    </div>
+  </div>
+
+<script>
+/*
+  English comments only inside code.
+  This script derives HD nodes using ethers v5 and writes a log that contains only private keys,
+  one per line, to the readonly textarea #logArea. It also provides copy/export utilities.
+*/
+
+(function(){
+  const $ = id => document.getElementById(id);
+
+  const generateBtn = $('generateBtn');
+  const clearBtn = $('clearBtn');
+  const copyAllBtn = $('copyAllBtn');
+  const exportTxtBtn = $('exportTxtBtn');
+  const logArea = $('logArea');
+  const logWrap = $('logWrap');
+  const msgBox = $('msg');
+  const resultArea = $('resultArea');
+  const showTableBtn = $('showTableBtn');
+  const hideTableBtn = $('hideTableBtn');
+
+  function showMessage(text, visible=true) {
+    if (!visible) { msgBox.style.display = 'none'; return; }
+    msgBox.textContent = text;
+    msgBox.style.display = 'block';
+  }
+  function clearMessage() { showMessage('', false); }
+
+  function sanitizePathTemplate(template) {
+    return template.replace(/\s+/g,'').replace(/\/$/,'');
+  }
+
+  function copyToClipboard(text, button) {
+    if (!navigator.clipboard) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch(e) {}
+      ta.remove();
+      if (button) { const old = button.textContent; button.textContent='已复制'; setTimeout(()=>button.textContent=old,900); }
+      return;
+    }
+    navigator.clipboard.writeText(text).then(()=>{
+      if (button) { const old = button.textContent; button.textContent='已复制'; setTimeout(()=>button.textContent=old,900); }
+    }).catch(()=>{ /* ignore errors */ });
+  }
+
+  function createTable(items) {
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>#</th><th>Derivation Path</th><th>Address</th><th>Private Key</th><th>Actions</th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    items.forEach(it=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = [
+        `<td>${it.index}</td>`,
+        `<td><code>${it.path}</code></td>`,
+        `<td><code>${it.address}</code></td>`,
+        `<td><pre>${it.privateKey}</pre></td>`,
+        `<td></td>`
+      ].join('');
+      const actionsTd = tr.querySelector('td:last-child');
+      const copyPrivBtn = document.createElement('button');
+      copyPrivBtn.type = 'button';
+      copyPrivBtn.className = 'copy-btn';
+      copyPrivBtn.textContent = '复制私钥';
+      copyPrivBtn.addEventListener('click', ()=>copyToClipboard(it.privateKey, copyPrivBtn));
+      actionsTd.appendChild(copyPrivBtn);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  generateBtn.addEventListener('click', ()=>{
+    clearMessage();
+    resultArea.innerHTML = '';
+    logArea.value = '';
+    logWrap.style.display = 'none';
+
+    const mnemonic = $('mnemonic').value.trim();
+    const pathTemplateRaw = $('pathTemplate').value.trim();
+    const startIndex = parseInt($('startIndex').value || '0', 10);
+    const count = parseInt($('count').value || '0', 10);
+
+    if (!mnemonic) { showMessage('请填写助记词（mnemonic）。'); return; }
+    if (isNaN(startIndex) || startIndex < 0) { showMessage('起始索引必须是 >= 0 的整数。'); return; }
+    if (isNaN(count) || count <= 0 || count > 200) { showMessage('生成数量必须在 1 到 200 之间。'); return; }
+    if (!pathTemplateRaw) { showMessage('请填写派生路径模板，例如 m/44\\\'/60\\\'/0\\\'/0'); return; }
+
+    const pathTemplate = sanitizePathTemplate(pathTemplateRaw);
+
+    // validate mnemonic
+    try {
+      let isValid = false;
+      if (ethers.utils.HDNode && typeof ethers.utils.HDNode.isValidMnemonic === 'function') {
+        isValid = ethers.utils.HDNode.isValidMnemonic(mnemonic);
+      } else {
+        // fallback: attempt fromMnemonic to see if it throws
+        try { ethers.utils.HDNode.fromMnemonic(mnemonic); isValid = true; } catch(e){ isValid=false; }
+      }
+      if (!isValid) { showMessage('助记词看起来无效，请检查单词与顺序。'); return; }
+    } catch (e) {
+      showMessage('助记词验证失败，请确认助记词格式正确。');
+      return;
+    }
+
+    // derive and build results
+    const results = [];
+    try {
+      const root = ethers.utils.HDNode.fromMnemonic(mnemonic);
+      const privLines = [];
+      for (let i=0;i<count;i++){
+        const idx = startIndex + i;
+        const fullPath = `${pathTemplate}/${idx}`;
+        const node = root.derivePath(fullPath);
+        const wallet = new ethers.Wallet(node.privateKey);
+        const item = {
+          index: idx,
+          path: fullPath,
+          address: wallet.address,
+          privateKey: node.privateKey
+        };
+        results.push(item);
+        // push only private key into log line (user requested only private keys)
+        privLines.push(node.privateKey);
+      }
+
+      // write log area (only private keys, one per line)
+      logArea.value = privLines.join('\n');
+      logWrap.style.display = 'flex';
+
+      // show summary and hidden table (user can toggle)
+      const summary = document.createElement('div');
+      summary.className = 'ok';
+      summary.textContent = `生成完成：从索引 ${startIndex} 开始，共生成 ${results.length} 个账户。私钥已写入下方 Log 区。`;
+      resultArea.appendChild(summary);
+
+      // prepare but hide table by default
+      const table = createTable(results);
+      table.style.display = 'none';
+      resultArea.appendChild(table);
+
+      showTableBtn.style.display = 'inline-block';
+      hideTableBtn.style.display = 'none';
+
+      // show/hide handlers
+      showTableBtn.onclick = () => { table.style.display='table'; showTableBtn.style.display='none'; hideTableBtn.style.display='inline-block'; };
+      hideTableBtn.onclick = () => { table.style.display='none'; hideTableBtn.style.display='none'; showTableBtn.style.display='inline-block'; };
+
+    } catch (err) {
+      showMessage('派生失败：请确认派生路径与助记词是否正确。');
+      return;
+    }
+  });
+
+  clearBtn.addEventListener('click', ()=>{
+    $('mnemonic').value = '';
+    $('pathTemplate').value = "m/44'/60'/0'/0";
+    $('startIndex').value = '0';
+    $('count').value = '5';
+    resultArea.innerHTML = '';
+    logArea.value = '';
+    logWrap.style.display = 'none';
+    clearMessage();
+  });
+
+  copyAllBtn.addEventListener('click', ()=>{
+    const text = logArea.value;
+    if (!text) { showMessage('当前没有可复制的私钥。'); return; }
+    copyToClipboard(text, copyAllBtn);
+  });
+
+  exportTxtBtn.addEventListener('click', ()=>{
+    const text = logArea.value;
+    if (!text) { showMessage('当前没有可导出的私钥。'); return; }
+    // create blob and download
+    const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const ts = new Date().toISOString().replace(/[:.]/g,'-');
+    a.download = `private-keys-${ts}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 3000);
+  });
+
+})();
+</script>
+</body>
+</html>
